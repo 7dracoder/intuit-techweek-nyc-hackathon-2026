@@ -849,7 +849,7 @@ def aggregate_cohort_curves(F, cohort_week, approved):
     return cohort_curves
 
 
-def survival_intervals(hazard_models, F_all, cohort_week, approved,
+def survival_intervals(hazard_models, pd_cal, cohort_week, approved,
                        X_app, categorical_cols):
     """
     Bootstrap-based 90 % timing-uncertainty intervals for each (cohort_week,
@@ -872,9 +872,10 @@ def survival_intervals(hazard_models, F_all, cohort_week, approved,
     ----------
     hazard_models : list[HistGradientBoostingClassifier]
         Bagged hazard classifiers returned by ``fit_hazard_models``.
-    F_all : np.ndarray, shape (n_applicants, N_AGE_WEEKS)
-        The *point-estimate* cumulative curves (not used for interval
-        computation; kept for interface consistency; may be None).
+    pd_cal : np.ndarray, shape (n_applicants,)
+        Calibrated PD per submission applicant; used to rescale each model's
+        timing shape to the correct incidence level (see
+        ``scale_curve_to_incidence``).
     cohort_week : np.ndarray, shape (n_applicants,)
         Integer cohort-week assignments for every submission applicant.
     approved : np.ndarray of bool, shape (n_applicants,)
@@ -896,12 +897,14 @@ def survival_intervals(hazard_models, F_all, cohort_week, approved,
     approved = np.asarray(approved, dtype=bool)
     cohort_week = np.asarray(cohort_week, dtype=int)
 
-    # Pre-compute F for ALL applicants for each hazard model so that the
-    # bootstrap loop only resamples precomputed arrays (no re-predictions).
-    # Shape: (n_models, n_applicants, N_AGE_WEEKS).
+    # Pre-compute incidence-scaled G for ALL applicants for each hazard model so
+    # that the bootstrap loop only resamples precomputed arrays (no
+    # re-predictions). Shape: (n_models, n_applicants, N_AGE_WEEKS).
     n_models = len(hazard_models)
     F_per_model = np.stack(
-        [applicant_cumulative_curve(m, X_app, categorical_cols) for m in hazard_models],
+        [scale_curve_to_incidence(
+            applicant_cumulative_curve(m, X_app, categorical_cols), pd_cal)
+         for m in hazard_models],
         axis=0,
     )  # (n_models, n_applicants, 13)
 
@@ -939,12 +942,59 @@ def survival_intervals(hazard_models, F_all, cohort_week, approved,
     return lo, hi
 
 
+def scale_curve_to_incidence(F, pd_cal):
+    """
+    Convert raw survival cumulative curves into *timing shapes* scaled by each
+    applicant's calibrated incidence (PD).
+
+    The discrete-time hazard model is well-calibrated in *shape* (the relative
+    distribution of defaults across loan age) but, as a powerful classifier on
+    person-period rows, it over-predicts the *level* (it recognizes a
+    defaulter's feature signature and assigns elevated hazard to all of that
+    loan's weekly rows).  We therefore decouple shape from level:
+
+        shape_i(a) = F_i(a) / F_i(13)            (normalized timing curve, ends at 1)
+        G_i(a)     = pd_i * shape_i(a)           (scaled by calibrated incidence)
+
+    so that the terminal cumulative default fraction G_i(13) == pd_i (the
+    applicant's calibrated PD) while the *shape* across loan age still comes
+    from the feature-conditioned survival model.  Averaging G over a cohort
+    then yields a trajectory whose terminal value is the cohort's mean PD and
+    whose shape reflects that cohort's feature mix.
+
+    Parameters
+    ----------
+    F : np.ndarray, shape (n_applicants, N_AGE_WEEKS)
+        Raw cumulative default curves from ``applicant_cumulative_curve``.
+    pd_cal : np.ndarray, shape (n_applicants,)
+        Calibrated probability of default per applicant (the well-calibrated
+        level from the Deliverable A PD model).
+
+    Returns
+    -------
+    G : np.ndarray, shape (n_applicants, N_AGE_WEEKS)
+        Incidence-scaled timing curves, non-decreasing in age, with
+        G[:, -1] == pd_cal.
+    """
+    F = np.asarray(F, dtype=float)
+    terminal = F[:, -1:].copy()                     # shape (n_app, 1)
+    # Guard zero-terminal rows: fall back to a linear ramp so the shape is still
+    # monotone and ends at 1 (these are applicants the hazard model predicts will
+    # essentially never default within the window).
+    linear = np.linspace(1.0 / N_AGE_WEEKS, 1.0, N_AGE_WEEKS)[None, :]
+    safe = terminal > 1e-12
+    shape = np.where(safe, F / np.where(safe, terminal, 1.0), linear)
+    G = np.asarray(pd_cal, dtype=float)[:, None] * shape
+    return G
+
+
 def build_deliverable_B(artifacts, train, val, cohorts):
     print("\n[B] Building cohort default trajectories (discrete-time hazard survival model) ...")
     feature_cols = artifacts["feature_cols"]
     categorical_cols = artifacts["categorical_cols"]
     decision = artifacts["decision"]
     sub = artifacts["submission"]
+    pd_cal = artifacts["pd_cal"]                     # calibrated PD per submission applicant
 
     # 1. Extract labeled training loans (default_flag not null).
     labeled = train[train["default_flag"].notna()].copy()
@@ -967,24 +1017,27 @@ def build_deliverable_B(artifacts, train, val, cohorts):
     X_app = prepare_features(sub, feature_cols, categorical_cols)
 
     # 6. Compute point-estimate F_all by averaging cumulative curves across all
-    #    N_BAG_SURV hazard models.
+    #    N_BAG_SURV hazard models, then rescale to calibrated incidence so the
+    #    trajectory LEVEL matches the PD model and only the SHAPE comes from the
+    #    (level-miscalibrated but shape-trustworthy) survival model.
     print("[B] Computing applicant cumulative curves (point estimate) ...")
     F_sum = np.zeros((len(X_app), N_AGE_WEEKS), dtype=float)
     for model in hazard_models:
         F_sum += applicant_cumulative_curve(model, X_app, categorical_cols)
     F_all = F_sum / N_BAG_SURV                       # shape (n_applicants, 13)
+    G_all = scale_curve_to_incidence(F_all, pd_cal)  # incidence-scaled timing curves
 
     # 7. Compute cohort_week assignments for all submission applicants.
     cohort_week = assign_cohort_week(sub, cohorts).to_numpy()
 
-    # 8. Aggregate per-cohort point-estimate curves.
+    # 8. Aggregate per-cohort point-estimate curves (from incidence-scaled G).
     print("[B] Aggregating cohort curves ...")
-    cohort_curves = aggregate_cohort_curves(F_all, cohort_week, approved_mask)  # (13, 13)
+    cohort_curves = aggregate_cohort_curves(G_all, cohort_week, approved_mask)  # (13, 13)
 
-    # 9. Compute timing-uncertainty intervals via bootstrap.
+    # 9. Compute timing-uncertainty intervals via bootstrap (also incidence-scaled).
     print(f"[B] Computing survival intervals ({N_BOOT_SURV} bootstrap iterations) ...")
     lo, hi = survival_intervals(
-        hazard_models, F_all, cohort_week, approved_mask, X_app, categorical_cols
+        hazard_models, pd_cal, cohort_week, approved_mask, X_app, categorical_cols
     )  # both shape (13, 13)
 
     # 10. Enforce per-cohort monotonicity (np.maximum.accumulate) on point, lo, hi.

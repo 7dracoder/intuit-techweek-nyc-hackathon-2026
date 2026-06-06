@@ -162,10 +162,27 @@ F(a) = 1 − S(a)                  # cumulative default fraction
 
 #### Step 4: Cohort aggregation (`aggregate_cohort_curves`)
 
-For each cohort week `w`, average `F(a)` over the approved applicants in that
-cohort (using `assign_cohort_week`). Empty cohorts fall back to the mean curve
-over all approved applicants. Riskier cohorts — those with higher mean hazards —
-reach any cumulative default fraction at an earlier loan age.
+For each cohort week `w`, average the incidence-scaled curve `G(a)` over the
+approved applicants in that cohort (using `assign_cohort_week`). Empty cohorts
+fall back to the mean curve over all approved applicants.
+
+**Level calibration (important fix):** The hazard classifier is well-calibrated
+in *shape* (the relative distribution of defaults across loan age) but
+over-predicts the *level* by ~5x — a powerful gradient-booster on person-period
+rows learns each defaulter's feature signature and assigns elevated hazard to all
+of that loan's weekly rows. Raw `F(13)` therefore lands near 0.50 instead of the
+true ~0.17 default rate. We fix this by decoupling shape from level
+(`scale_curve_to_incidence`):
+
+```
+shape_i(a) = F_i(a) / F_i(13)        # normalized timing curve, ends at 1.0
+G_i(a)     = PD_i × shape_i(a)        # scaled by calibrated incidence
+```
+
+So each applicant's terminal cumulative default fraction equals their calibrated
+PD (the well-calibrated level from the Deliverable A model), while the timing
+*shape* still comes from the feature-conditioned survival model. Riskier cohorts
+reach a higher terminal level AND can default at a different pace.
 
 #### Step 5: Uncertainty intervals (`survival_intervals`)
 
