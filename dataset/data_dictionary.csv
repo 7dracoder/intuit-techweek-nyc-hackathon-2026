@@ -1,0 +1,45 @@
+field,dtype,group,intervenable,notes
+business_id,string,business_identity,False,Stable identifier for a business. A business may submit more than one application; businesses never span more than one of train/validation/test.
+applicant_id,string,business_identity,False,Unique identifier for a single application. Use this to join your submissions.
+sector,categorical,business_identity,False,Integer-coded industry sector. Codes are anonymized (0..N-1) and carry no real-world sector name.
+geography_region,categorical,business_identity,False,Integer-coded geography bucket.
+vintage_years,float,business_identity,False,Age of the business in years.
+employee_count_bucket,categorical,business_identity,False,Integer-coded company size bucket (smaller code = fewer employees).
+stated_annual_revenue,float,self_reported,True,Annual revenue as reported by the applicant on the application.
+stated_time_in_business,float,self_reported,True,Time in business in years as reported by the applicant.
+requested_amount,float,self_reported,True,Loan amount requested by the applicant in dollars (product range roughly $5K-$50K).
+intended_use_of_funds,categorical,self_reported,False,Integer-coded stated purpose of the loan.
+has_linked_bank_feed,bool,bank_feed,False,Whether the applicant linked a bank feed. Bank-feed columns are null when this is false.
+observed_monthly_revenue_avg_3mo,float,bank_feed,True,Average monthly revenue over the last 3 months from the linked bank feed (dollars). Null if no linked feed.
+observed_revenue_trend_3mo,float,bank_feed,True,Recent revenue trend from the bank feed. Null if no linked feed.
+observed_revenue_volatility,float,bank_feed,True,Revenue volatility from the bank feed. Null if no linked feed.
+observed_cash_balance_p10,float,bank_feed,True,10th-percentile daily cash balance from the bank feed (dollars; can be negative). Null if no linked feed.
+observed_overdraft_count_3mo,int,bank_feed,True,Count of overdraft events in the last 3 months from the bank feed. Null if no linked feed.
+payroll_regularity_score,float,bank_feed,True,Score for how regular payroll outflows are (higher = more regular). Null if no linked feed.
+aggregate_credit_utilization,float,bureau_credit,True,Aggregate credit utilization ratio from the credit bureau (0-1).
+recent_inquiries_count_6mo,int,bureau_credit,True,Number of credit inquiries in the last 6 months.
+existing_debt_obligations,float,bureau_credit,True,Existing debt obligations in dollars.
+owner_personal_credit_band,categorical,bureau_credit,True,Integer-coded band for the owner's personal credit.
+days_since_last_external_decline,float,bureau_credit,False,Days since the applicant was last declined by another lender. Null if no recorded prior external decline.
+account_age_days,int,platform_engagement,False,Days the applicant has been on the platform.
+platform_active_months,int,platform_engagement,False,Number of months of active platform use.
+bookkeeping_recency_days,float,platform_engagement,False,Days since the last bookkeeping activity.
+invoice_payment_delinquency_rate,float,platform_engagement,True,Rate of late invoice payments (0-1).
+prior_loans_count,int,platform_engagement,False,Number of prior loans this business took with this lender before this application.
+prior_loans_default_count,int,platform_engagement,False,Number of those prior loans that defaulted (at most prior_loans_count).
+prior_loans_amount_total,float,platform_engagement,False,Total dollars borrowed across prior loans with this lender.
+application_timestamp,timestamp,application_context,False,Date/time of the application. Determines which cohort_week an application belongs to.
+application_channel,categorical,application_context,True,Integer-coded acquisition channel for the application.
+multi_lender_inquiry_count_30d,int,application_context,True,Number of near-simultaneous inquiries to multiple lenders in the last 30 days.
+days_since_last_inquiry_elsewhere,float,application_context,False,Days since the last inquiry to another lender. Null if none recorded.
+repeat_application_count,int,application_context,False,How many times this business has previously applied with this lender.
+requested_amount_to_observed_revenue,float,application_context,False,Engineered ratio of requested amount to observed monthly revenue.
+prior_underwriter_score,float,prior_underwriter,False,Score the prior underwriting system assigned to this application (its model is not provided).
+prior_decision,categorical,prior_underwriter,False,The prior underwriter decision: approved or declined. Outcomes are observed only for approved applications.
+prior_approved_amount,float,prior_underwriter,False,Amount the prior underwriter approved (may differ from requested). Null if declined.
+default_flag,bool,outcome,False,"Whether the loan defaulted. Default triggers on any of: 3 consecutive missed daily draws, 6 cumulative missed draws, or a positive outstanding balance at day 90 (see README). Present only for prior-approved and matured loans; null for declined or immature loans."
+days_to_default,float,outcome,False,"Day in [1,90] on which the loan first met a default condition. Null if it did not default."
+days_to_full_repayment,float,outcome,False,Day on which the loan was fully repaid. Null if it defaulted or has not matured.
+repayment_status,categorical,outcome,False,"Observed end state: paid_in_full, defaulted, or open."
+final_recovered_amount,float,outcome,False,Dollars recovered after a default. Null otherwise.
+observation_status,categorical,outcome,False,Whether the loan has matured or is still censored (not yet fully observed).
