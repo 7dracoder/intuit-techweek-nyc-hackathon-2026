@@ -99,8 +99,9 @@ so PD is unchanged within 1e-6.
 counterfactual PD movements per query run. It writes nothing to the submission;
 it lets the team confirm directional correctness at a glance.
 
-Observed at runtime: **≈20% up / 21% down / 58% near-zero**, which is
-economically correct (most interventions are small moves).
+Observed at runtime: **≈16% up / 84% down / 0% near-zero** across the 900
+queries — directionally correct, since the query set is dominated by
+improvement-type interventions, so most counterfactual PDs go down.
 
 ---
 
@@ -245,8 +246,9 @@ DTD_MIN, DTD_MAX = 1, 90   # days_to_default window
 | `expand_person_periods` | `solution.py` | New — person-period row expansion |
 | `fit_hazard_models` | `solution.py` | New — bagged discrete-time hazard |
 | `applicant_cumulative_curve` | `solution.py` | New — hazards → F(a) per applicant |
-| `aggregate_cohort_curves` | `solution.py` | New — mean F(a) per cohort week |
-| `survival_intervals` | `solution.py` | New — bootstrap 90% bounds |
+| `scale_curve_to_incidence` | `solution.py` | New — decouple timing shape from level; G(a) = PD × shape(a) |
+| `aggregate_cohort_curves` | `solution.py` | New — mean G(a) per cohort week |
+| `survival_intervals` | `solution.py` | New — 3-source bootstrap 90% bounds (shape + incidence + PD-level) |
 | `build_deliverable_B` | `solution.py` | Reworked body (same signature) |
 | `report_directional_effects` | `solution.py` | New — print-only diagnostic |
 | `build_deliverable_C` | `solution.py` | Calls directional diagnostic (same output) |
@@ -285,13 +287,16 @@ DTD_MIN, DTD_MAX = 1, 90   # days_to_default window
   reports — guaranteed monotone by the product form.
 - **Bagged ensemble:** reuse of the same `HistGradientBoostingClassifier` already
   powering Deliverable A; no new dependency.
-- **Dual-source intervals:** bootstrapping over both model selection (timing-shape
-  uncertainty) and applicant resampling (incidence uncertainty) gives more honest
-  90% bounds than bootstrapping incidence alone.
+- **Three-source intervals:** the B bootstrap propagates timing-shape uncertainty
+  (bagged hazard model selection), incidence sampling uncertainty (cohort applicant
+  resampling), and **systematic PD-level uncertainty** (shared per-iteration shift
+  within each applicant's 90% PD band). The level term is correlated across
+  applicants and survives cohort averaging — it is the dominant source and
+  produces honest ~0.10-wide bands that grow with loan age.
 
 ---
 
-## Verified results (post-upgrade)
+## Verified results (final, post all fixes)
 
 - Validator: **PASS** (0 errors, 1 warning — missing PDF writeup, human step)
 - Validation AUC: **0.7518** (unchanged — A is untouched)
@@ -300,9 +305,28 @@ DTD_MIN, DTD_MAX = 1, 90   # days_to_default window
 - Approval rate: **63.6%** of 13,306 applicants
 - Mean effective recovery (LGD): **0.697**
 - Profit-simulated PD threshold: **0.230**
-- Deliverable B: **169-row grid written** — feature-conditioned survival model,
-  8 hazard models fitted on **613,893 person-period rows**
+- Deliverable B: **169-row grid, 0 monotonicity violations, 0 interval violations**
+  - Terminal CDR per cohort: **~0.134–0.141** (matches approved cohort mean PD, corrected from broken ~0.50)
+  - Mean B interval width: **~0.10** (corrected from unrealistic 0.006; propagates 3 uncertainty sources)
+  - Intervals widen with loan age: ~0.014 at age 1, ~0.19 at age 13
+  - 8 hazard models on **613,893 person-period rows**
 - Deliverable C: **900 rows written** — 10 structural equations fitted
 - SCM directional effects: **15.7% up / 84.2% down / 0.1% near-zero**
-  (economically correct — most test queries are improvement interventions,
-  hence mostly downward PD movement)
+  (economically correct — query set dominated by improvement interventions)
+
+## Bug fixed post-deployment
+
+**Deliverable B level calibration.** The survival model's raw `F(13)` was ~0.50
+for every cohort instead of the true ~0.14. Root cause: `HistGradientBoostingClassifier`
+on person-period rows learns each defaulter's feature signature and assigns high
+hazard to all their weekly rows, inflating the level ~5x while the shape remains
+correct. Fix: `scale_curve_to_incidence` normalizes each applicant's curve to
+end at 1.0 (pure shape), then multiplies by their calibrated PD. Terminal CDR
+now equals the cohort's mean calibrated PD.
+
+**Deliverable B interval width.** After the level fix, the intervals were still
+only ~0.006 wide — capturing only timing-shape and applicant-resampling noise, 
+which nearly cancels out over a cohort. The dominant source (systematic PD-model
+error, correlated across applicants) was missing. Fix: `survival_intervals` now
+draws a shared per-iteration standard-normal shift scaled by each applicant's PD
+band width. Width grew to ~0.10 and properly widens with loan age.
