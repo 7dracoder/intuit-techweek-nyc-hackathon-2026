@@ -217,11 +217,16 @@ A realistic checklist, in order:
 
 ### Measured quality (on labeled validation)
 
-- **AUC ≈ 0.75**, **Brier ≈ 0.134**.
-- **Calibration is near-perfect** — predicted vs. observed default rate match to
-  three decimals across deciles.
-- Decision policy cleanly approves the low-PD book and declines above the
-  ~0.24 break-even PD. Approval rate **~67%**.
+- **AUC ≈ 0.7544** unweighted / **0.7525** final (IPW kept), **Brier ≈ 0.134**.
+- **40 features (5 engineered)** — revenue consistency, debt-service coverage,
+  utilization×inquiries, cash-to-requested, prior-default ratio.
+- **Calibration is near-perfect** — predicted vs. observed default rate match
+  across deciles (see Figure 2 in the writeup).
+- **100% bin-wise interval coverage** at mean width 0.232 (Figure 3).
+- Decision policy approves the profitable low-PD book; profit-simulated threshold
+  ≈ 0.21. Approval rate **~64%**.
+- SCM (Deliverable C): 10 fitted equations; no-op interventions move PD by exactly
+  0.000 (asserted in `pytest`); 6/6 tests pass.
 - Validator: **PASS** (0 errors; only the expected "writeup PDF not found"
   warning until you export the PDF).
 

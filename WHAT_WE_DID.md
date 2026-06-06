@@ -296,23 +296,61 @@ DTD_MIN, DTD_MAX = 1, 90   # days_to_default window
 
 ---
 
-## Verified results (final, post all fixes)
+## Enhancement 3 — Feature engineering (Deliverables A / B / C)
+
+The model used the 35 raw fields directly; several economically meaningful
+relationships had to be re-learned by the trees from scratch.
+`compute_engineered` / `attach_engineered` add **5 NaN-safe, no-leakage** features,
+registered into `feature_cols` so they flow through the A PD model, the B hazard
+model, and C scoring:
+
+- `eng_revenue_consistency` = observed annualized revenue / stated annual revenue
+  (a direct probe of the optimistic-self-reporting assumption).
+- `eng_debt_service_coverage` = observed annualized revenue / existing debt.
+- `eng_util_x_inquiries` = aggregate utilization x recent inquiries (credit stress).
+- `eng_cash_to_requested` = cash-balance floor / requested amount (liquidity buffer).
+- `eng_prior_default_ratio` = prior defaults / prior loans.
+
+All are deterministic functions of input columns, so they are **recomputed inside
+`scm_intervene`** after the SCM step — preserving the no-op invariant exactly
+(verified by `test_solution.py::test_scm_noop_invariant_zero_delta`) while letting
+interventions propagate into the engineered features too.
+
+**Measured impact:** unweighted validation AUC rose 0.7517 -> **0.7544** (+0.0027)
+with flat Brier. With IPW the auto-toggle still retains it (final AUC 0.7525 /
+Brier 0.1339), so the features are kept for robustness on the never-funded region
+and writeup value. Cross-fitted isotonic calibration was evaluated and
+intentionally not adopted (the deployed calibrator already fits on a clean
+held-out val set; cross-fitting within val would add variance without changing
+the deployed map).
+
+## Enhancement 4 — Deliverable D figures + run diagnostics
+
+`solution.py` now writes `submission/assets/metrics.json` at the end of a run
+(headline metrics, per-bin conformal deltas, validation PD/outcome/interval arrays,
+B person-period count, C directional split, SCM edge list). A new offline script
+`make_writeup_assets.py` (matplotlib; **not** imported by the scored pipeline)
+turns it into `dag.png` (Figure 1), `calibration.png` (Figure 2), `coverage.png` +
+`coverage_table.md` (Figure 3), and `results_summary.md`. These are embedded in
+`submission_D_writeup.md`. PDF export stays a human step.
+
+## Verified results (final, post all fixes + feature engineering)
 
 - Validator: **PASS** (0 errors, 1 warning — missing PDF writeup, human step)
-- Validation AUC: **0.7518** (unchanged — A is untouched)
-- Brier score: **0.1338**
-- Per-bin conformal deltas: `[0. 0. 0.082 0.072 0.046 0.05 0.05 0.072 0. 0.]`
-- Approval rate: **63.6%** of 13,306 applicants
+- Validation AUC: **0.7544** no-IPW / **0.7525** final (IPW kept)
+- Brier score: **0.1339**
+- Per-bin conformal deltas: `[0.038 0.114 0.044 0.05 0.046 0.05 0.076 0.102 0.066 0.01]`
+- Bin-wise interval coverage: **100%** at mean width **0.232**
+- Approval rate: **63.9%** of 13,306 applicants
 - Mean effective recovery (LGD): **0.697**
-- Profit-simulated PD threshold: **0.230**
+- Profit-simulated PD threshold: **0.210**
+- Features: **40** total (**5 engineered**)
 - Deliverable B: **169-row grid, 0 monotonicity violations, 0 interval violations**
-  - Terminal CDR per cohort: **~0.134–0.141** (matches approved cohort mean PD, corrected from broken ~0.50)
-  - Mean B interval width: **~0.10** (corrected from unrealistic 0.006; propagates 3 uncertainty sources)
-  - Intervals widen with loan age: ~0.014 at age 1, ~0.19 at age 13
   - 8 hazard models on **613,893 person-period rows**
 - Deliverable C: **900 rows written** — 10 structural equations fitted
-- SCM directional effects: **15.7% up / 84.2% down / 0.1% near-zero**
+- SCM directional effects: **15.6% up / 84.4% down / 0.0% near-zero**
   (economically correct — query set dominated by improvement interventions)
+- Tests: **`pytest` 6 passed** (incl. no-op invariant `max|dPD| < 1e-9`)
 
 ## Bug fixed post-deployment
 

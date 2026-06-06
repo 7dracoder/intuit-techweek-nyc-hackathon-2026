@@ -37,17 +37,21 @@ Read this together with `PROJECT_GUIDE.md` (the what/why of the project) and
 | 11 | SCM counterfactuals (abduction-action-prediction) | C | ✅ DONE | `fit_scm`, `scm_intervene`, `build_deliverable_C` |
 | 12 | Per-bin (Mondrian) conformal intervals | A/B/C | ✅ DONE | `tune_perbin_conformal`, `apply_perbin_conformal` |
 | 13 | Stronger learner (LightGBM/stacking) | A/B/C | 🔴 NOT STARTED | `CLF_PARAMS`, `train_bagged_models` |
-| 14 | Feature engineering | A/B/C | 🔴 NOT STARTED | `prepare_features` |
-| 15 | Writeup (Deliverable D) | D | 🟡 PARTIAL | `submission_D_writeup.md` |
+| 14 | Feature engineering (5 NaN-safe features) | A/B/C | ✅ DONE | `compute_engineered`, `attach_engineered`, `main` |
+| 14b | Run diagnostics + writeup figures | D | ✅ DONE | `METRICS` dump, `make_writeup_assets.py` |
+| 14c | Invariant tests (no-op, monotonicity, FE) | all | ✅ DONE | `test_solution.py` (6 passing) |
+| 15 | Writeup (Deliverable D) — figures + tables embedded | D | 🟡 PARTIAL (team name + PDF export = 👤) | `submission_D_writeup.md` |
 | 16 | Team registration | — | 👤 YOUR JOB | Google Form |
 | 17 | Export writeup → PDF | D | 👤 YOUR JOB | `submission/submission_D_writeup.pdf` |
 | 18 | Upload 4 files | — | 👤 YOUR JOB | team private link |
 
-**Verified after the upgrades:** validator prints **PASS**; validation AUC 0.7528
-(IPW kept), Brier 0.1335, near-perfect calibration, 100% bin-wise interval
-coverage at ~0.20 width, ~62% approval; SCM no-op interventions move PD by exactly
-0.000 and real interventions are directionally correct (≈20% up / 21% down / 58%
-near-zero).
+**Verified after the upgrades + feature engineering:** validator prints **PASS**;
+validation AUC **0.7544** unweighted / **0.7525** final (IPW kept), Brier 0.1339,
+near-perfect calibration, **100% bin-wise interval coverage at 0.232 width**,
+**63.9% approval**; 40 features (5 engineered); SCM no-op interventions move PD by
+exactly 0.000 (`pytest` asserts `max|dPD| < 1e-9`) and real interventions are
+directionally correct (15.6% up / 84.4% down / 0% near-zero — the query set is
+dominated by improvement interventions). 6/6 tests pass.
 
 ---
 

@@ -31,6 +31,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import warnings
 from pathlib import Path
 
@@ -54,6 +55,12 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "dataset"
 OUT = ROOT / "submission"
 OUT.mkdir(exist_ok=True)
+ASSETS = OUT / "assets"
+
+# Diagnostics collected during a run and dumped to assets/metrics.json so the
+# writeup-figure generator (make_writeup_assets.py) reflects the EXACT scored
+# pipeline without retraining. Writing this never changes the submission CSVs.
+METRICS: dict = {}
 
 RANDOM_SEED = 42
 N_BAG = 8                      # ensemble members for uncertainty
@@ -117,6 +124,59 @@ def prepare_features(df: pd.DataFrame, feature_cols, categorical_cols) -> pd.Dat
     for c in X.columns:
         X[c] = pd.to_numeric(X[c], errors="coerce").astype("float64")
     return X
+
+
+# --------------------------------------------------------------------------- #
+# Feature engineering (NaN-safe, no-leakage; all derived from existing inputs)
+# --------------------------------------------------------------------------- #
+# Engineered names are appended to the feature list so they flow through the A
+# model, the B hazard model, and C scoring. Each is a deterministic function of
+# input (non-outcome) columns, so the SCM no-op invariant is preserved: on a
+# no-op intervention the inputs are unchanged, hence so are these features.
+ENGINEERED = [
+    "eng_revenue_consistency",     # observed vs stated revenue (optimism check)
+    "eng_debt_service_coverage",   # observed revenue vs existing debt
+    "eng_util_x_inquiries",        # credit-stress interaction
+    "eng_cash_to_requested",       # liquidity buffer vs loan size
+    "eng_prior_default_ratio",     # share of prior loans that defaulted
+]
+
+
+def _num(df: pd.DataFrame, name: str) -> pd.Series:
+    if name in df.columns:
+        return pd.to_numeric(df[name], errors="coerce")
+    return pd.Series(np.nan, index=df.index, dtype="float64")
+
+
+def compute_engineered(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute the ENGINEERED features from raw inputs (NaN-safe divisions)."""
+    stated_rev = _num(df, "stated_annual_revenue")
+    obs_rev_m = _num(df, "observed_monthly_revenue_avg_3mo")
+    obs_rev_a = obs_rev_m * 12.0
+    debt = _num(df, "existing_debt_obligations")
+    util = _num(df, "aggregate_credit_utilization")
+    inq = _num(df, "recent_inquiries_count_6mo")
+    cash = _num(df, "observed_cash_balance_p10")
+    req = _num(df, "requested_amount")
+    prior_n = _num(df, "prior_loans_count")
+    prior_def = _num(df, "prior_loans_default_count")
+
+    out = pd.DataFrame(index=df.index)
+    out["eng_revenue_consistency"] = obs_rev_a / stated_rev.where(stated_rev > 0)
+    out["eng_debt_service_coverage"] = obs_rev_a / debt.where(debt > 0)
+    out["eng_util_x_inquiries"] = util * inq
+    out["eng_cash_to_requested"] = cash / req.where(req > 0)
+    out["eng_prior_default_ratio"] = prior_def / prior_n.where(prior_n > 0)
+    return out
+
+
+def attach_engineered(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of df with the ENGINEERED columns added (idempotent)."""
+    eng = compute_engineered(df)
+    df = df.copy()
+    for c in ENGINEERED:
+        df[c] = eng[c].to_numpy()
+    return df
 
 
 def assign_cohort_week(df: pd.DataFrame, cohorts: pd.DataFrame) -> pd.Series:
@@ -454,6 +514,13 @@ def scm_intervene(row, feature, value, scm, categorical_cols):
     r["requested_amount_to_observed_revenue"] = _rescale_ratio(
         ratio_old, amt_old, rev_old, amt_new, rev_new
     )
+
+    # Recompute engineered features from the post-intervention row so the change
+    # propagates to them too. Deterministic in the row's inputs, so a no-op
+    # intervention leaves them (and PD) exactly unchanged.
+    eng_row = compute_engineered(pd.DataFrame([r])).iloc[0]
+    for c in ENGINEERED:
+        r[c] = eng_row[c]
     return r
 
 
@@ -485,6 +552,8 @@ def build_deliverable_A(train, val, test, feature_cols, categorical_cols):
     print(f"[A] no-IPW : AUC={auc0:.4f}  Brier={brier0:.4f}")
 
     models, iso = base_models, base_iso
+    ipw_kept = False
+    auc1 = brier1 = frac_low = None
     if USE_IPW:
         w_all, e, frac_low = compute_ipw_weights(train, tr_lab_mask, feature_cols, categorical_cols)
         w_tr = w_all[tr_lab_mask]
@@ -497,6 +566,7 @@ def build_deliverable_A(train, val, test, feature_cols, categorical_cols):
         if (auc1 >= auc0 - 0.005) and (brier1 <= brier0 + 0.002):
             print("[A] -> keeping IPW (reject inference applied).")
             models, iso = ipw_models, ipw_iso
+            ipw_kept = True
         else:
             print("[A] -> discarding IPW (did not help); using baseline.")
 
@@ -555,6 +625,28 @@ def build_deliverable_A(train, val, test, feature_cols, categorical_cols):
     })
     out.to_csv(OUT / "submission_A_decisions.csv", index=False)
     print(f"[A] approved {decision.mean()*100:.1f}% of {len(out)} -> submission_A_decisions.csv")
+
+    # Record diagnostics for the writeup-figure generator (no submission impact).
+    lo_va_c, hi_va_c = apply_perbin_conformal(cal_va, lo_va, hi_va, edges, deltas)
+    _, lo_va_c, hi_va_c = clamp_intervals(cal_va.copy(), lo_va_c, hi_va_c)
+    METRICS["A"] = {
+        "n_features": int(len(feature_cols)),
+        "n_engineered": int(len([c for c in ENGINEERED if c in feature_cols])),
+        "auc_noipw": float(auc0), "brier_noipw": float(brier0),
+        "auc_ipw": (None if auc1 is None else float(auc1)),
+        "brier_ipw": (None if brier1 is None else float(brier1)),
+        "ipw_kept": bool(ipw_kept),
+        "auc_final": float(auc1 if ipw_kept else auc0),
+        "brier_final": float(brier1 if ipw_kept else brier0),
+        "mean_recovery": float(rec_mean),
+        "profit_threshold": float(best_thr),
+        "approval_rate": float(decision.mean()),
+        "conformal_deltas": [float(d) for d in deltas],
+        "val_pd": [float(v) for v in cal_va],
+        "val_y": [int(v) for v in y_va],
+        "val_lo": [float(v) for v in lo_va_c],
+        "val_hi": [float(v) for v in hi_va_c],
+    }
 
     return {
         "models": models, "iso": iso, "edges": edges, "deltas": deltas,
@@ -1036,6 +1128,8 @@ def build_deliverable_B(artifacts, train, val, cohorts):
     # 4. Fit bagged hazard models on person-period rows.
     print(f"[B] Fitting {N_BAG_SURV} hazard models on {len(X_pp)} person-period rows ...")
     hazard_models = fit_hazard_models(X_pp, y_pp, categorical_cols, n_bag=N_BAG_SURV)
+    METRICS["B"] = {"n_person_period": int(len(X_pp)), "n_hazard_models": int(N_BAG_SURV),
+                    "n_events": int(np.asarray(y_pp).sum())}
 
     # 5. Get approved applicants from artifacts.
     approved_mask = (decision == 1)
@@ -1188,6 +1282,15 @@ def build_deliverable_C(artifacts, train, queries, feature_cols, categorical_col
 
     # Print directional-effects diagnostic (Req 4.3) — no written output changed.
     report_directional_effects(results, sub)
+    n_up = sum(1 for _q, p, _l, _h, b in results if p - b > 1e-6)
+    n_down = sum(1 for _q, p, _l, _h, b in results if p - b < -1e-6)
+    n_flat = len(results) - n_up - n_down
+    METRICS["C"] = {
+        "n_equations": int(len(scm)),
+        "equations": list(scm.keys()),
+        "n_queries": int(len(results)),
+        "n_up": int(n_up), "n_down": int(n_down), "n_flat": int(n_flat),
+    }
 
     # Strip the 5th element (baseline_pd) before building the output DataFrame.
     rows_4 = [(qid, pd_cf, lo, hi) for qid, pd_cf, lo, hi, _ in results]
@@ -1210,11 +1313,25 @@ def main():
     print("Loading data ...")
     train, val, test, data_dict, cohorts, queries = load_data()
     feature_cols, categorical_cols = get_feature_lists(data_dict)
-    print(f"{len(feature_cols)} features ({len(categorical_cols)} categorical).")
+
+    # Feature engineering: attach derived columns and register them as features.
+    train = attach_engineered(train)
+    val = attach_engineered(val)
+    test = attach_engineered(test)
+    feature_cols = feature_cols + [c for c in ENGINEERED if c not in feature_cols]
+    print(f"{len(feature_cols)} features ({len(categorical_cols)} categorical, "
+          f"{len(ENGINEERED)} engineered).")
 
     artifacts = build_deliverable_A(train, val, test, feature_cols, categorical_cols)
     build_deliverable_B(artifacts, train, val, cohorts)
     build_deliverable_C(artifacts, train, queries, feature_cols, categorical_cols)
+
+    # Dump run diagnostics for the writeup-figure generator.
+    ASSETS.mkdir(parents=True, exist_ok=True)
+    METRICS["scm_edges"] = {k: list(v) for k, v in SCM_EDGES.items()}
+    with open(ASSETS / "metrics.json", "w") as f:
+        json.dump(METRICS, f, indent=2)
+    print(f"[main] wrote run diagnostics -> {ASSETS / 'metrics.json'}")
 
     print("\nDone. Validate with:")
     print(f"    python validate_submission.py {OUT}")

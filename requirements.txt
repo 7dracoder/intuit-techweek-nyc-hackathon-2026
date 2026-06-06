@@ -4,3 +4,11 @@ pandas>=2.2
 
 # Added for solution.py (model training, calibration).
 scikit-learn>=1.4
+
+# Writeup-figure generation only (make_writeup_assets.py). NOT imported by the
+# scored pipeline (solution.py stays numpy/pandas/scikit-learn only).
+matplotlib>=3.7
+
+# Test-only dependencies (test_solution.py); not imported by solution.py.
+pytest>=7.0
+hypothesis>=6.0
