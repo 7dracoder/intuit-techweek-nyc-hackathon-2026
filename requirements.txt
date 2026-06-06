@@ -1,0 +1,6 @@
+# Minimal dependencies to read the dataset and run validate_submission.py.
+numpy>=1.26
+pandas>=2.2
+
+# Added for solution.py (model training, calibration).
+scikit-learn>=1.4
