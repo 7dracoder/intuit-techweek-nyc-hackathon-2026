@@ -559,6 +559,7 @@ def build_deliverable_A(train, val, test, feature_cols, categorical_cols):
     return {
         "models": models, "iso": iso, "edges": edges, "deltas": deltas,
         "submission": sub, "X_sub": X_sub, "pd_cal": pd_cal, "decision": decision,
+        "pd_lo": lo, "pd_hi": hi,
         "categorical_cols": categorical_cols, "feature_cols": feature_cols,
     }
 
@@ -849,33 +850,40 @@ def aggregate_cohort_curves(F, cohort_week, approved):
     return cohort_curves
 
 
-def survival_intervals(hazard_models, pd_cal, cohort_week, approved,
+def survival_intervals(hazard_models, pd_cal, pd_lo, pd_hi, cohort_week, approved,
                        X_app, categorical_cols):
     """
     Bootstrap-based 90 % timing-uncertainty intervals for each (cohort_week,
     loan_age_weeks) grid cell.
 
-    Two sources of uncertainty are propagated simultaneously in each of the
+    Three sources of uncertainty are propagated simultaneously across the
     ``N_BOOT_SURV = 200`` iterations (Requirements 7.1, 7.2):
 
       (a) **Timing-shape uncertainty**: a bagged hazard model is picked
-          uniformly at random from ``hazard_models`` to recompute F for the
-          resampled applicants.
-      (b) **Incidence uncertainty**: approved applicants within each cohort
-          week are resampled with replacement before averaging to form the
-          cohort curve.
+          uniformly at random from ``hazard_models`` to recompute the timing
+          shape for the resampled applicants.
+      (b) **Incidence sampling uncertainty**: approved applicants within each
+          cohort week are resampled with replacement before averaging.
+      (c) **PD-level (model) uncertainty**: each iteration draws a single shared
+          standard-normal ``z`` and shifts every applicant's incidence within
+          its own 90% PD band (``pd_lo``..``pd_hi``). Because the shift is shared
+          across applicants it is *systematic* and does NOT average away over a
+          cohort - this is the dominant source of trajectory-level uncertainty
+          and the reason the prior intervals (shape+incidence only) were far too
+          tight.
 
-    The 5th and 95th percentiles over the 200 trajectories become
-    ``cdr_lower_90`` and ``cdr_upper_90`` respectively.
+    The 5th and 95th percentiles over the iterations become ``cdr_lower_90`` and
+    ``cdr_upper_90`` respectively.
 
     Parameters
     ----------
     hazard_models : list[HistGradientBoostingClassifier]
         Bagged hazard classifiers returned by ``fit_hazard_models``.
     pd_cal : np.ndarray, shape (n_applicants,)
-        Calibrated PD per submission applicant; used to rescale each model's
-        timing shape to the correct incidence level (see
-        ``scale_curve_to_incidence``).
+        Calibrated PD per submission applicant (the incidence level).
+    pd_lo, pd_hi : np.ndarray, shape (n_applicants,)
+        Per-applicant 90% PD interval bounds (from Deliverable A). Used to size
+        the shared systematic level shift.
     cohort_week : np.ndarray, shape (n_applicants,)
         Integer cohort-week assignments for every submission applicant.
     approved : np.ndarray of bool, shape (n_applicants,)
@@ -896,17 +904,28 @@ def survival_intervals(hazard_models, pd_cal, cohort_week, approved,
     rng = np.random.RandomState(RANDOM_SEED)
     approved = np.asarray(approved, dtype=bool)
     cohort_week = np.asarray(cohort_week, dtype=int)
+    pd_cal = np.asarray(pd_cal, dtype=float)
+    pd_lo = np.asarray(pd_lo, dtype=float)
+    pd_hi = np.asarray(pd_hi, dtype=float)
 
-    # Pre-compute incidence-scaled G for ALL applicants for each hazard model so
-    # that the bootstrap loop only resamples precomputed arrays (no
-    # re-predictions). Shape: (n_models, n_applicants, N_AGE_WEEKS).
+    # Per-applicant PD standard deviation implied by the 90% band
+    # (z_0.95 ~= 1.645 covers lo..hi => sigma = (hi - lo) / (2 * 1.645)).
+    pd_sigma = np.clip((pd_hi - pd_lo) / (2.0 * 1.645), 0.0, None)
+
+    # Pre-compute timing SHAPES for ALL applicants for each hazard model, so the
+    # bootstrap loop only resamples/rescales precomputed arrays (no
+    # re-predictions). We store the *unit-incidence* shape (curve / terminal) so
+    # the per-iteration PD draw can rescale it cheaply.
     n_models = len(hazard_models)
-    F_per_model = np.stack(
-        [scale_curve_to_incidence(
-            applicant_cumulative_curve(m, X_app, categorical_cols), pd_cal)
-         for m in hazard_models],
-        axis=0,
-    )  # (n_models, n_applicants, 13)
+    shapes_per_model = []
+    for m in hazard_models:
+        F = applicant_cumulative_curve(m, X_app, categorical_cols)  # (n_app, 13)
+        terminal = F[:, -1:].copy()
+        linear = np.linspace(1.0 / N_AGE_WEEKS, 1.0, N_AGE_WEEKS)[None, :]
+        safe = terminal > 1e-12
+        shape = np.where(safe, F / np.where(safe, terminal, 1.0), linear)
+        shapes_per_model.append(shape)
+    shapes_per_model = np.stack(shapes_per_model, axis=0)  # (n_models, n_app, 13)
 
     # Pre-compute per-cohort approved indices (for efficient per-cohort resampling).
     cohort_indices = {}
@@ -922,18 +941,26 @@ def survival_intervals(hazard_models, pd_cal, cohort_week, approved,
     for b in range(N_BOOT_SURV):
         # (a) Pick a random hazard model (timing-shape uncertainty).
         m_idx = rng.randint(0, n_models)
-        F_m = F_per_model[m_idx]  # (n_applicants, 13)
+        shape_m = shapes_per_model[m_idx]  # (n_applicants, 13)
+
+        # (c) Shared systematic PD-level shift for this iteration. One z applies
+        #     to all applicants (correlated model error), so it survives cohort
+        #     averaging. Each applicant moves within its own band via pd_sigma.
+        z = rng.standard_normal()
+        pd_draw = np.clip(pd_cal + z * pd_sigma, 0.0, 1.0)
+
+        # Incidence-scaled curves for this iteration: G = pd_draw * shape.
+        G_m = pd_draw[:, None] * shape_m  # (n_applicants, 13)
 
         # (b) For each cohort week, resample approved applicants with replacement
-        #     and average the precomputed F values (no re-prediction needed).
+        #     and average (incidence sampling uncertainty).
         for w in range(1, 14):
             idx = cohort_indices[w]
             if len(idx) == 0:
                 idx = all_approved_idx          # fallback: all approved applicants
 
-            # Resample with replacement (incidence uncertainty).
             res_idx = rng.choice(idx, size=len(idx), replace=True)
-            boot_curves[b, w - 1] = F_m[res_idx].mean(axis=0)
+            boot_curves[b, w - 1] = G_m[res_idx].mean(axis=0)
 
     # 5th / 95th percentile over the bootstrap dimension.
     lo = np.percentile(boot_curves, 5, axis=0)   # shape (13, N_AGE_WEEKS)
@@ -1034,10 +1061,14 @@ def build_deliverable_B(artifacts, train, val, cohorts):
     print("[B] Aggregating cohort curves ...")
     cohort_curves = aggregate_cohort_curves(G_all, cohort_week, approved_mask)  # (13, 13)
 
-    # 9. Compute timing-uncertainty intervals via bootstrap (also incidence-scaled).
+    # 9. Compute timing-uncertainty intervals via bootstrap (shape + incidence +
+    #    systematic PD-level uncertainty from the A model's 90% PD band).
     print(f"[B] Computing survival intervals ({N_BOOT_SURV} bootstrap iterations) ...")
+    pd_lo = artifacts["pd_lo"]
+    pd_hi = artifacts["pd_hi"]
     lo, hi = survival_intervals(
-        hazard_models, pd_cal, cohort_week, approved_mask, X_app, categorical_cols
+        hazard_models, pd_cal, pd_lo, pd_hi, cohort_week, approved_mask,
+        X_app, categorical_cols
     )  # both shape (13, 13)
 
     # 10. Enforce per-cohort monotonicity (np.maximum.accumulate) on point, lo, hi.

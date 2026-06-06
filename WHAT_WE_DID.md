@@ -186,15 +186,21 @@ reach a higher terminal level AND can default at a different pace.
 
 #### Step 5: Uncertainty intervals (`survival_intervals`)
 
-For `N_BOOT_SURV = 200` bootstrap iterations:
-- Pick one of the 8 bagged hazard models (captures **timing-shape uncertainty**).
-- Resample the cohort's approved applicants with replacement (captures **incidence
-  uncertainty**).
-- Recompute the cohort curve.
+For `N_BOOT_SURV = 200` bootstrap iterations, **three** sources of uncertainty
+are propagated simultaneously:
+- **Timing-shape uncertainty:** pick one of the 8 bagged hazard models.
+- **Incidence sampling uncertainty:** resample the cohort's approved applicants
+  with replacement.
+- **PD-level (model) uncertainty:** apply a single shared per-iteration shift of
+  every applicant's incidence within its own 90% PD band (from Deliverable A).
+  Because the shift is shared across applicants it is *systematic* (correlated),
+  so it does NOT average away over a cohort — this is the dominant source of
+  trajectory-level uncertainty.
 
-The 5th/95th percentiles become `cdr_lower_90` / `cdr_upper_90`. This propagates
-**both** sources of uncertainty — not just incidence noise — which is what the
-scoring rubric rewards.
+The 5th/95th percentiles become `cdr_lower_90` / `cdr_upper_90`. This produces
+honest bands (mean width ~0.10) that widen with loan age as cumulative
+uncertainty compounds, rather than the unrealistically tight bands (~0.006) you
+get from shape+incidence resampling alone.
 
 #### Output contract (preserved)
 

@@ -138,9 +138,16 @@ where it is not. (With binary labels, per-row 0/1 coverage is not the right targ
 we calibrate coverage of the *rate* within risk bins, which is what B is scored
 on - and we observe 100% bin-wise coverage on validation at a mean width ~0.20.)
 We clamp all bounds to [0,1], enforce `lower <= point <= upper`, and impose a small
-floor width to avoid dishonest zero-width intervals. B intervals additionally come
-from bootstrapping each cohort's incidence and inherit the monotone timing curve.
-The tradeoff: tighter bands score better on width but risk under-coverage, so we
+floor width to avoid dishonest zero-width intervals. **B intervals propagate three
+sources of uncertainty** via a 200-iteration bootstrap: (1) timing-shape
+uncertainty (random draw from the 8 bagged hazard models), (2) incidence sampling
+uncertainty (resampling each cohort's approved applicants with replacement), and
+(3) systematic PD-level uncertainty (a shared per-iteration shift of every
+applicant's incidence within its own 90% PD band from the A model). The PD-level
+term is shared across applicants, so it is correlated rather than diversifiable
+and does not average away over a cohort - it is the dominant source of
+trajectory-level uncertainty and the reason the bands widen with loan age. The
+tradeoff: tighter bands score better on width but risk under-coverage, so we
 pick the smallest per-bin widening that reaches the coverage target.
 
 ## 5. Limitations & what we'd do differently
