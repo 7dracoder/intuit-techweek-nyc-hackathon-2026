@@ -1,6 +1,5 @@
 # Won #rd Place in this Intuit Hackathon!!!!!
-
-![Tanmay Sahu(MSCS at NYU), Subhradeep Acharjee(MSCS at NYU)](https://drive.google.com/file/d/1S1D0ZZE9RnL51bs6beetQVeZhbJ2INwy/view?usp=sharing)
+<img src="https://drive.google.com/uc?export=view&id=1S1D0ZZE9RnL51bs6beetQVeZhbJ2INwy" alt="Image" width="600">
 
 # SMB Underwriting Challenge - Participant Instructions
 
