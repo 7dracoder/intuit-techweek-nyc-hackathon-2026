@@ -1,5 +1,12 @@
 # Won 3rd Place in this Intuit Hackathon!!!!!
-<img src="hackathon.png" alt="Hackathon certificate" width="700">
+<div style="height: 520px; overflow: hidden;">
+  <img
+    src="hackathon.png"
+    alt="Hackathon certificate"
+    width="700"
+    style="margin-top: -180px;"
+  />
+</div>
 
 # SMB Underwriting Challenge - Participant Instructions
 
